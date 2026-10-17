@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { loadScores, saveScore, todayInLosAngeles, formatEntryDate } from './lib/scores';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const QUESTIONS = [
@@ -12,12 +13,15 @@ const QUESTIONS = [
 
 const COLORS = ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#5AC8FA'];
 
-const ScoreSelector = ({ value, onChange, questionIndex }) => {
+const ScoreSelector = ({ value, onChange, disabled }) => {
   return (
     <div className="flex space-x-1">
       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(score => (
         <button
           key={score}
+          type="button"
+          disabled={disabled}
+          aria-pressed={value === score}
           onClick={() => onChange(score)}
           className={`w-8 h-8 rounded-full text-sm font-medium transition-colors ${
             value === score
@@ -33,108 +37,64 @@ const ScoreSelector = ({ value, onChange, questionIndex }) => {
 };
 
 export default function GoldsmithTracker() {
-  const [userName, setUserName] = useState(localStorage.getItem('goldsmith_user_name') || '');
-  const [showWelcome, setShowWelcome] = useState(!localStorage.getItem('goldsmith_user_name'));
+  const [userName, setUserName] = useState(() => localStorage.getItem('goldsmith_user_name') || '');
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('goldsmith_user_name'));
   const [activeTab, setActiveTab] = useState('entry');
   const [scores, setScores] = useState(Array(6).fill(null));
   const [data, setData] = useState([]);
-  const [binId, setBinId] = useState(localStorage.getItem('goldsmith_bin_id') || '');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [reload, setReload] = useState(0);
+  const savingRef = useRef(false);
+  const [hasEarlierStorage] = useState(() => Boolean(localStorage.getItem('goldsmith_bin_id')));
 
-  const getTodayPST = () => {
-    const now = new Date();
-    const pstDate = new Date(now.toLocaleString("en-US", {timeZone: "America/Los_Angeles"}));
-    return pstDate.toISOString().split('T')[0];
-  };
-
-  const handleWelcomeSubmit = (e) => {
-    e.preventDefault();
+  const handleWelcomeSubmit = (event) => {
+    event.preventDefault();
     if (userName.trim()) {
       localStorage.setItem('goldsmith_user_name', userName.trim());
+      setUserName(userName.trim());
       setShowWelcome(false);
     }
   };
 
-  const loadData = async () => {
-    if (!binId) return;
-    
-    setLoading(true);
-    try {
-      const response = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
-        headers: {
-          'X-Master-Key': '$2a$10$1k.9BsOXYGU9hhEyxu3Ns.FS7nBiXMFOAQCU4D8nZyJYTwM5QWJP6'
-        }
-      });
-      
-      if (response.ok) {
-        const result = await response.json();
-        setData(result.record || []);
-        
-        // Load today's scores if they exist
-        const today = getTodayPST();
-        const todayEntry = result.record.find(entry => entry.date === today);
-        if (todayEntry) {
-          setScores(todayEntry.scores);
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load data:', error);
-    }
-    setLoading(false);
-  };
-
-  const saveData = async (newData) => {
-    if (!binId) {
-      // Create new bin
+  useEffect(() => {
+    const controller = new AbortController();
+    async function load() {
+      setLoading(true);
+      setError('');
       try {
-        const response = await fetch('https://api.jsonbin.io/v3/b', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Master-Key': '$2a$10$1k.9BsOXYGU9hhEyxu3Ns.FS7nBiXMFOAQCU4D8nZyJYTwM5QWJP6'
-          },
-          body: JSON.stringify(newData)
-        });
-        
-        const result = await response.json();
-        const newBinId = result.metadata.id;
-        setBinId(newBinId);
-        localStorage.setItem('goldsmith_bin_id', newBinId);
-      } catch (error) {
-        console.error('Failed to create bin:', error);
-        return;
-      }
-    } else {
-      // Update existing bin
-      try {
-        await fetch(`https://api.jsonbin.io/v3/b/${binId}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Master-Key': '$2a$10$1k.9BsOXYGU9hhEyxu3Ns.FS7nBiXMFOAQCU4D8nZyJYTwM5QWJP6'
-          },
-          body: JSON.stringify(newData)
-        });
-      } catch (error) {
-        console.error('Failed to save data:', error);
+        const entries = await loadScores(controller.signal);
+        if (controller.signal.aborted) return;
+        setData(entries);
+        setScores(entries.find(entry => entry.date === todayInLosAngeles())?.scores || Array(6).fill(null));
+      } catch (cause) {
+        if (!controller.signal.aborted) setError(cause.message || 'Your scores could not be loaded. Please try again.');
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
-  };
+    load();
+    return () => controller.abort();
+  }, [reload]);
 
   const handleSubmit = async () => {
-    const today = getTodayPST();
-    
-    const newEntry = {
-      date: today,
-      scores: scores
-    };
-    
-    const updatedData = data.filter(entry => entry.date !== today);
-    updatedData.push(newEntry);
-    updatedData.sort((a, b) => new Date(a.date) - new Date(b.date));
-    
-    setData(updatedData);
-    await saveData(updatedData);
+    if (savingRef.current || loading || scores.every(score => score === null)) return;
+    savingRef.current = true;
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const entries = await saveScore({ date: todayInLosAngeles(), scores });
+      setData(entries);
+      setNotice('Entry saved.');
+    } catch (cause) {
+      setError(cause.message || 'Your entry could not be saved. Please try again.');
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   const formatChartData = () => {
@@ -148,12 +108,6 @@ export default function GoldsmithTracker() {
       return formatted;
     });
   };
-
-  useEffect(() => {
-    if (!showWelcome) {
-      loadData();
-    }
-  }, [binId, showWelcome]);
 
   if (showWelcome) {
     return (
@@ -224,10 +178,20 @@ export default function GoldsmithTracker() {
           </button>
         </div>
 
+        {error && (
+          <div role="alert" className="mb-4 rounded-lg bg-red-50 p-4 text-red-800">
+            <p>{error}</p>
+            <button type="button" disabled={loading || saving} onClick={() => setReload(value => value + 1)} className="mt-2 underline">
+              Reload saved scores
+            </button>
+          </div>
+        )}
+        {notice && <p role="status" className="mb-4 text-center text-green-800">{notice}</p>}
+
         {activeTab === 'entry' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="text-xl font-medium text-gray-900 mb-6">
-              {getTodayPST()}
+              {todayInLosAngeles()}
             </h2>
             
             <div className="space-y-8">
@@ -243,7 +207,7 @@ export default function GoldsmithTracker() {
                       newScores[index] = score;
                       setScores(newScores);
                     }}
-                    questionIndex={index}
+                    disabled={loading || saving}
                   />
                 </div>
               ))}
@@ -251,10 +215,10 @@ export default function GoldsmithTracker() {
             
             <button
               onClick={handleSubmit}
-              disabled={loading}
+              disabled={loading || saving || scores.every(score => score === null)}
               className="w-full mt-8 bg-blue-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
             >
-              {loading ? 'Saving...' : 'Save Entry'}
+              {saving ? 'Saving...' : loading ? 'Loading...' : 'Save Entry'}
             </button>
           </div>
         )}
@@ -272,7 +236,7 @@ export default function GoldsmithTracker() {
                       dataKey="date" 
                       stroke="#666"
                       fontSize={12}
-                      tickFormatter={(date) => new Date(date).toLocaleDateString()}
+                      tickFormatter={(date) => formatEntryDate(date)}
                     />
                     <YAxis 
                       domain={[1, 10]} 
@@ -280,7 +244,7 @@ export default function GoldsmithTracker() {
                       fontSize={12}
                     />
                     <Tooltip 
-                      labelFormatter={(date) => new Date(date).toLocaleDateString()}
+                      labelFormatter={(date) => formatEntryDate(date)}
                       contentStyle={{
                         backgroundColor: 'white',
                         border: '1px solid #e5e7eb',
@@ -311,10 +275,13 @@ export default function GoldsmithTracker() {
           </div>
         )}
         
-        {!binId && (
-          <div className="mt-4 text-center text-sm text-gray-500">
-            Your data will be automatically saved to a secure cloud storage after your first entry.
-          </div>
+        <p className="mt-4 text-center text-sm text-gray-500">
+          This browser keeps access to your saved scores. Clearing its cookies loses that access.
+        </p>
+        {hasEarlierStorage && (
+          <p className="mt-2 text-center text-sm text-gray-500">
+            This update starts new storage. Scores from the previous account have not been imported.
+          </p>
         )}
       </div>
     </div>
